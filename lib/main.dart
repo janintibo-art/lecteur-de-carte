@@ -11,10 +11,13 @@ class CardLabApp extends StatelessWidget {
   const CardLabApp({super.key});
   @override
   Widget build(BuildContext context) => MaterialApp(
-    debugShowCheckedModeBanner: false,
     title: 'Lecteur de Carte',
-    theme: ThemeData(colorScheme: ColorScheme.fromSeed(
-      seedColor: const Color(0xFF27D1BD), brightness: Brightness.dark), useMaterial3: true),
+    debugShowCheckedModeBanner: false,
+    theme: ThemeData(
+      colorScheme: ColorScheme.fromSeed(
+        seedColor: const Color(0xFF27D1BD), brightness: Brightness.dark),
+      useMaterial3: true,
+    ),
     home: const CardLabHome(),
   );
 }
@@ -31,18 +34,19 @@ class _CardLabHomeState extends State<CardLabHome> {
   final apduController = TextEditingController(text: '00 A4 04 00');
   final profileName = TextEditingController();
   final profileTarget = TextEditingController();
-  String profileAction = 'none';
+  final cardLabelController = TextEditingController();
+  final List<String> draftTargets = [];
+  List<CardProfile> profiles = [];
+  List<Map<String, dynamic>> devices = [];
+  final List<Map<String, dynamic>> apduHistory = [];
+  AtrReport? report;
   String rawOutput = 'Branche ton lecteur puis lance la détection.';
   String scanMessage = 'En attente';
-  List<Map<String, dynamic>> devices = [];
-  AtrReport? report;
+  String apduResult = 'Aucune commande envoyée.';
+  String simulatorMessage = 'Choisis une carte virtuelle pour la simuler.';
   bool busy = false;
   bool apduBusy = false;
   bool profileBusy = false;
-  String apduResult = 'Aucune commande envoyée.';
-  String simulatorMessage = 'Aucune carte virtuelle sélectionnée.';
-  final List<Map<String, dynamic>> apduHistory = [];
-  List<CardProfile> profiles = [];
 
   @override
   void initState() {
@@ -56,16 +60,8 @@ class _CardLabHomeState extends State<CardLabHome> {
     apduController.dispose();
     profileName.dispose();
     profileTarget.dispose();
+    cardLabelController.dispose();
     super.dispose();
-  }
-
-  Future<void> loadProfiles() async {
-    try {
-      final loaded = await CardProfileStore.load();
-      if (mounted) setState(() => profiles = loaded);
-    } catch (e) {
-      showMessage('Impossible de charger les profils : $e');
-    }
   }
 
   void showMessage(String message) {
@@ -73,60 +69,189 @@ class _CardLabHomeState extends State<CardLabHome> {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
   }
 
+  Future<void> loadProfiles() async {
+    try {
+      final loaded = await CardProfileStore.load();
+      if (mounted) setState(() => profiles = loaded);
+    } catch (e) {
+      showMessage('Chargement des profils impossible : $e');
+    }
+  }
+
+  Future<void> persist(List<CardProfile> next) async {
+    await CardProfileStore.save(next);
+    if (mounted) setState(() => profiles = next);
+  }
+
+  void addDraftTarget() {
+    final path = profileTarget.text.trim().replaceAll('"', '');
+    if (path.isEmpty || !path.toLowerCase().endsWith('.exe')) {
+      showMessage('Choisis un chemin complet vers un fichier .exe.');
+      return;
+    }
+    if (draftTargets.length >= 8) {
+      showMessage('Maximum de 8 applications par profil.');
+      return;
+    }
+    if (draftTargets.any((p) => p.toLowerCase() == path.toLowerCase())) {
+      showMessage('Ce programme est déjà dans la liste.');
+      return;
+    }
+    setState(() => draftTargets.add(path));
+    profileTarget.clear();
+  }
+
+  Future<void> pickExe() async {
+    if (!Platform.isWindows) {
+      showMessage('Le sélecteur de programmes est disponible sur Windows uniquement.');
+      return;
+    }
+    try {
+      const script = r'''Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.OpenFileDialog; $d.Filter = 'Applications Windows (*.exe)|*.exe'; $d.Multiselect = $false; if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::Write($d.FileName) }''';
+      final process = await Process.run('powershell.exe', [
+        '-NoProfile', '-NonInteractive', '-STA', '-Command', script,
+      ]);
+      if (process.exitCode != 0) throw StateError('${process.stderr}');
+      final path = (process.stdout as String).trim();
+      if (path.isNotEmpty && mounted) setState(() => profileTarget.text = path);
+    } catch (e) {
+      showMessage('Sélection impossible : $e');
+    }
+  }
+
   Future<void> addProfile() async {
     final name = profileName.text.trim();
-    final target = profileTarget.text.trim();
-    if (name.isEmpty) { showMessage('Donne un nom à la carte virtuelle.'); return; }
-    if (profileAction == 'open' && target.isEmpty) {
-      showMessage('Indique le chemin du programme Windows.'); return;
+    if (name.isEmpty) {
+      showMessage('Donne un nom au profil.');
+      return;
     }
+    if (profileBusy) return;
     setState(() => profileBusy = true);
     try {
       final now = DateTime.now();
+      final apps = List<String>.from(draftTargets);
       final profile = CardProfile(
-        id: 'SIM-${now.microsecondsSinceEpoch}', name: name,
-        action: profileAction, target: profileAction == 'open' ? target : '',
+        id: 'SIM-${now.microsecondsSinceEpoch}',
+        name: name,
+        action: apps.isEmpty ? 'none' : 'open',
+        target: apps.isEmpty ? '' : apps.first,
+        targets: apps,
         created: now.toIso8601String(),
+        cardLabel: cardLabelController.text.trim(),
       );
-      final next = [...profiles, profile];
-      await CardProfileStore.save(next);
+      await persist([...profiles, profile]);
       if (!mounted) return;
       setState(() {
-        profiles = next;
-        simulatorMessage = 'Carte virtuelle ${profile.id} créée : aucune écriture physique.';
+        draftTargets.clear();
+        simulatorMessage = 'Profil virtuel « $name » créé, sans écriture sur une carte.';
       });
       profileName.clear();
       profileTarget.clear();
-      showMessage('Profil enregistré sur cet appareil.');
-    } catch (e) { showMessage('Enregistrement impossible : $e'); }
-    finally { if (mounted) setState(() => profileBusy = false); }
+      cardLabelController.clear();
+      showMessage('Profil enregistré localement.');
+    } catch (e) {
+      showMessage('Enregistrement impossible : $e');
+    } finally {
+      if (mounted) setState(() => profileBusy = false);
+    }
   }
 
   Future<void> removeProfile(CardProfile profile) async {
     try {
-      final next = profiles.where((p) => p.id != profile.id).toList();
-      await CardProfileStore.save(next);
-      if (mounted) setState(() => profiles = next);
-    } catch (e) { showMessage('Suppression impossible : $e'); }
+      await persist(profiles.where((p) => p.id != profile.id).toList());
+    } catch (e) {
+      showMessage('Suppression impossible : $e');
+    }
   }
 
-  Future<void> simulate(CardProfile profile) async {
+  Future<void> editCardLabel(CardProfile profile) async {
+    final controller = TextEditingController(text: profile.cardLabel);
+    final label = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Référence de la future carte'),
+        content: Column(mainAxisSize: MainAxisSize.min, children: [
+          const Text('Étiquette manuelle uniquement : aucun identifiant matériel lu, aucune authentification.'),
+          const SizedBox(height: 12),
+          TextField(controller: controller, maxLength: 64,
+            decoration: const InputDecoration(labelText: 'Référence / surnom')),
+        ]),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Annuler')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, controller.text.trim()),
+            child: const Text('Enregistrer')),
+        ],
+      ),
+    );
+    // Le contrôleur n'est plus utilisé après la fermeture du dialogue.
+    if (label == null) return;
+    try {
+      await persist(profiles.map((p) => p.id == profile.id
+          ? p.withCardLabel(label) : p).toList());
+    } catch (e) {
+      showMessage('Association impossible : $e');
+    }
+  }
+
+  void simulate(CardProfile profile) {
     setState(() => simulatorMessage =
-      'Carte virtuelle : ${profile.name}\nIdentifiant local : ${profile.id}\nAction : ${profile.action}\nAucune carte physique programmée.');
+      'Carte virtuelle : ${profile.name}\nID local : ${profile.id}\n'
+      'Référence déclarée : ${profile.cardLabel.isEmpty ? 'aucune' : profile.cardLabel}\n'
+      '${profile.applications.length} application(s) configurée(s).\n'
+      'Simulation uniquement. Rien n’est exécuté automatiquement.');
   }
 
   Future<void> launchProfile(CardProfile profile) async {
-    if (!Platform.isWindows) { showMessage('Le lancement de programme est réservé à Windows.'); return; }
-    if (profile.action != 'open') { showMessage('Ce profil ne lance aucune application.'); return; }
-    final path = profile.target.trim();
-    if (path.isEmpty || !path.toLowerCase().endsWith('.exe') || !File(path).existsSync()) {
-      showMessage('Chemin EXE invalide ou programme introuvable.'); return;
+    if (!Platform.isWindows) {
+      showMessage('Exécution réservée à Windows.');
+      return;
     }
+    if (profileBusy || profile.applications.isEmpty) {
+      showMessage('Aucune application à lancer.');
+      return;
+    }
+    final approved = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Confirmer les lancements'),
+        content: SingleChildScrollView(child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('${profile.applications.length} programme(s) vont être ouverts manuellement :'),
+            const SizedBox(height: 12),
+            for (final path in profile.applications) Padding(
+              padding: const EdgeInsets.only(bottom: 8), child: SelectableText(path)),
+          ],
+        )),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Annuler')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Lancer')),
+        ],
+      ),
+    );
+    if (approved != true || !mounted) return;
+    setState(() => profileBusy = true);
+    final messages = <String>[];
     try {
-      await Process.start(path, const [], mode: ProcessStartMode.detached,
-        workingDirectory: File(path).parent.path);
-      showMessage('Application lancée manuellement.');
-    } catch (e) { showMessage('Échec du lancement : $e'); }
+      for (final path in profile.applications) {
+        final file = File(path);
+        if (!path.toLowerCase().endsWith('.exe') || !await file.exists()) {
+          messages.add('Introuvable : $path');
+          continue;
+        }
+        try {
+          await Process.start(path, const [],
+            mode: ProcessStartMode.detached, workingDirectory: file.parent.path);
+          messages.add('Lancé : $path');
+        } catch (e) {
+          messages.add('Erreur : $path — $e');
+        }
+      }
+      if (mounted) setState(() => simulatorMessage = messages.join('\n'));
+    } finally {
+      if (mounted) setState(() => profileBusy = false);
+    }
   }
 
   void analyzeAtr() => setState(() => report = AtrDecoder.decode(atrController.text));
@@ -190,7 +315,8 @@ class _CardLabHomeState extends State<CardLabHome> {
     try {
       Map<String, dynamic> response;
       if (Platform.isAndroid) {
-        final received = await channel.invokeMapMethod<String, dynamic>('sendSafeApdu', {'action': action});
+        final received = await channel.invokeMapMethod<String, dynamic>(
+          'sendSafeApdu', {'action': action});
         response = Map<String, dynamic>.from(received ?? {});
       } else if (Platform.isWindows) {
         final script = await rootBundle.loadString('assets/pcsc_apdu.ps1');
@@ -203,7 +329,8 @@ class _CardLabHomeState extends State<CardLabHome> {
             '-File', file.path, '-Action', action,
           ]);
           if (process.exitCode != 0) throw Exception('${process.stderr} ${process.stdout}');
-          response = Map<String, dynamic>.from(jsonDecode((process.stdout as String).trim()) as Map);
+          response = Map<String, dynamic>.from(
+            jsonDecode((process.stdout as String).trim()) as Map);
         } finally { await dir.delete(recursive: true); }
       } else { throw UnsupportedError('Plateforme non prise en charge'); }
       final sw = response['sw']?.toString().toUpperCase();
@@ -221,17 +348,20 @@ class _CardLabHomeState extends State<CardLabHome> {
         apduHistory.insert(0, {'date': DateTime.now().toIso8601String(), ...response});
         apduResult = const JsonEncoder.withIndent('  ').convert(response);
       });
-    } catch (e) { if (mounted) setState(() => apduResult = 'Erreur de communication : $e'); }
-    finally { if (mounted) setState(() => apduBusy = false); }
+    } catch (e) {
+      if (mounted) setState(() => apduResult = 'Erreur de communication : $e');
+    } finally { if (mounted) setState(() => apduBusy = false); }
   }
 
   void exportDiagnostic() {
     final data = <String, dynamic>{
-      'application': 'Lecteur de Carte V6', 'diagnostic': rawOutput,
-      'lecteurs': devices, 'atr': atrController.text, 'journal_apdu': apduHistory,
+      'application': 'Lecteur de Carte V7', 'diagnostic': rawOutput,
+      'lecteurs': devices, 'atr': atrController.text,
+      'journal_apdu': apduHistory,
       'profils_virtuels': profiles.map((p) => p.toJson()).toList(),
     };
-    Clipboard.setData(ClipboardData(text: const JsonEncoder.withIndent('  ').convert(data)));
+    Clipboard.setData(ClipboardData(
+      text: const JsonEncoder.withIndent('  ').convert(data)));
     showMessage('Rapport JSON copié dans le presse-papiers.');
   }
 
@@ -239,7 +369,8 @@ class _CardLabHomeState extends State<CardLabHome> {
     margin: const EdgeInsets.symmetric(vertical: 8),
     child: Padding(padding: const EdgeInsets.all(16), child: Column(
       crossAxisAlignment: CrossAxisAlignment.start,
-      children: [Text(title, style: Theme.of(context).textTheme.titleMedium), const SizedBox(height: 12), content],
+      children: [Text(title, style: Theme.of(context).textTheme.titleMedium),
+        const SizedBox(height: 12), content],
     )),
   );
 
@@ -248,7 +379,7 @@ class _CardLabHomeState extends State<CardLabHome> {
     length: 4,
     child: Scaffold(
       appBar: AppBar(
-        title: const Text('LECTEUR DE CARTE  ·  V6'),
+        title: const Text('LECTEUR DE CARTE  ·  V7'),
         bottom: const TabBar(isScrollable: true, tabs: [
           Tab(icon: Icon(Icons.usb), text: 'Lecteur'),
           Tab(icon: Icon(Icons.insights), text: 'ATR'),
@@ -258,130 +389,165 @@ class _CardLabHomeState extends State<CardLabHome> {
       ),
       body: TabBarView(children: [
         ListView(padding: const EdgeInsets.all(16), children: [
-          const Text('Diagnostic USB / PC-SC', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+          const Text('Diagnostic USB / PC-SC',
+            style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
           const SizedBox(height: 8), Text(scanMessage), const SizedBox(height: 12),
           FilledButton.icon(onPressed: busy ? null : scan,
-            icon: const Icon(Icons.search), label: Text(busy ? 'Analyse en cours…' : 'Analyser lecteur et carte')),
+            icon: const Icon(Icons.search),
+            label: Text(busy ? 'Analyse en cours…' : 'Analyser lecteur et carte')),
           for (final device in devices) panel('Lecteur / périphérique', Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [for (final entry in device.entries)
               Padding(padding: const EdgeInsets.symmetric(vertical: 3),
                 child: SelectableText('${entry.key} : ${entry.value}'))],
           )),
-          panel('Journal technique', Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            SelectableText(rawOutput), const SizedBox(height: 8),
-            TextButton.icon(onPressed: () => Clipboard.setData(ClipboardData(text: rawOutput)),
-              icon: const Icon(Icons.copy), label: const Text('Copier le diagnostic')),
-          ])),
-          OutlinedButton.icon(onPressed: exportDiagnostic, icon: const Icon(Icons.ios_share),
-            label: const Text('Copier le rapport JSON')),
-          const Text('Android : autorise le port USB puis relance. Windows : PC/SC doit être disponible.'),
+          panel('Journal technique', Column(
+            crossAxisAlignment: CrossAxisAlignment.start, children: [
+              SelectableText(rawOutput), const SizedBox(height: 8),
+              TextButton.icon(onPressed: () => Clipboard.setData(
+                ClipboardData(text: rawOutput)),
+                icon: const Icon(Icons.copy), label: const Text('Copier le diagnostic')),
+            ])),
+          OutlinedButton.icon(onPressed: exportDiagnostic,
+            icon: const Icon(Icons.ios_share), label: const Text('Copier rapport JSON')),
+          const Text('Android : autorise le port USB. Windows : service PC/SC requis.'),
         ]),
         ListView(padding: const EdgeInsets.all(16), children: [
-          const Text('Explorateur ATR', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+          const Text('Explorateur ATR',
+            style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
           const SizedBox(height: 8),
-          const Text('L’ATR donne des paramètres techniques, pas l’identité du titulaire.'),
+          const Text('L’ATR contient des paramètres techniques, pas l’identité du titulaire.'),
           const SizedBox(height: 12),
           TextField(controller: atrController, minLines: 2, maxLines: 4,
-            decoration: const InputDecoration(labelText: 'ATR hexadécimal', hintText: '3B 00', border: OutlineInputBorder())),
+            decoration: const InputDecoration(labelText: 'ATR hexadécimal',
+              hintText: '3B 00', border: OutlineInputBorder())),
           const SizedBox(height: 8),
           FilledButton.icon(onPressed: analyzeAtr, icon: const Icon(Icons.manage_search),
             label: const Text('Décoder l’ATR')),
-          OutlinedButton.icon(onPressed: () { atrController.text = '3B 00'; analyzeAtr(); },
-            icon: const Icon(Icons.school_outlined), label: const Text('ATR de démonstration')),
+          OutlinedButton.icon(onPressed: () {
+              atrController.text = '3B 00'; analyzeAtr();
+            }, icon: const Icon(Icons.school_outlined),
+            label: const Text('ATR de démonstration')),
           if (report != null) panel('Décodage ISO 7816', Column(
             crossAxisAlignment: CrossAxisAlignment.start, children: [
               SelectableText(report!.normalized), const SizedBox(height: 8),
-              if (report!.protocols.isNotEmpty) Text('Protocoles : ${report!.protocols.join(', ')}'),
-              for (final line in report!.lines) Padding(padding: const EdgeInsets.only(top: 8), child: SelectableText(line)),
-              for (final warning in report!.warnings) Padding(padding: const EdgeInsets.only(top: 8),
-                child: Text('Attention : $warning', style: TextStyle(color: Theme.of(context).colorScheme.error))),
-            ],
-          )),
+              if (report!.protocols.isNotEmpty)
+                Text('Protocoles : ${report!.protocols.join(', ')}'),
+              for (final line in report!.lines) Padding(
+                padding: const EdgeInsets.only(top: 8), child: SelectableText(line)),
+              for (final warning in report!.warnings) Padding(
+                padding: const EdgeInsets.only(top: 8), child: Text(
+                  'Attention : $warning',
+                  style: TextStyle(color: Theme.of(context).colorScheme.error))),
+            ])),
         ]),
         ListView(padding: const EdgeInsets.all(16), children: [
-          const Text('Laboratoire APDU', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+          const Text('Laboratoire APDU',
+            style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
           const SizedBox(height: 8),
-          const Text('Le champ hexadécimal sert à l’analyse locale. Seules deux commandes prédéfinies sont envoyées.'),
+          const Text('Analyse locale d’APDU. Seules deux commandes prédéfinies sont envoyées.'),
           const SizedBox(height: 12),
           TextField(controller: apduController,
-            decoration: const InputDecoration(labelText: 'Commande hexadécimale', border: OutlineInputBorder()),
-            onChanged: (_) => setState(() {})),
-          panel('Interprétation', Column(crossAxisAlignment: CrossAxisAlignment.start,
-            children: [for (final line in ApduExplanation.explain(apduController.text))
-              Padding(padding: const EdgeInsets.only(bottom: 8), child: SelectableText(line))])),
+            decoration: const InputDecoration(labelText: 'Commande hexadécimale',
+              border: OutlineInputBorder()), onChanged: (_) => setState(() {})),
+          panel('Interprétation', Column(
+            crossAxisAlignment: CrossAxisAlignment.start, children: [
+              for (final line in ApduExplanation.explain(apduController.text))
+                Padding(padding: const EdgeInsets.only(bottom: 8),
+                  child: SelectableText(line)),
+            ])),
           panel('Échange avec une carte autorisée', Column(
             crossAxisAlignment: CrossAxisAlignment.start, children: [
-              const Text('SELECT MF : 00 A4 00 00 02 3F 00'), const SizedBox(height: 8),
+              const Text('SELECT MF : 00 A4 00 00 02 3F 00'),
+              const SizedBox(height: 8),
               FilledButton.icon(onPressed: apduBusy ? null : () => executeSafeApdu('select-mf'),
                 icon: const Icon(Icons.touch_app), label: const Text('Envoyer SELECT MF')),
               const SizedBox(height: 12),
-              const Text('READ BINARY : 00 B0 00 00 10 (16 octets)'), const SizedBox(height: 8),
+              const Text('READ BINARY : 00 B0 00 00 10 (16 octets)'),
+              const SizedBox(height: 8),
               OutlinedButton.icon(onPressed: apduBusy ? null : () => executeSafeApdu('read-16'),
                 icon: const Icon(Icons.visibility_outlined), label: const Text('Lire 16 octets')),
               const SizedBox(height: 12), SelectableText(apduResult),
               if (apduHistory.isNotEmpty) TextButton.icon(onPressed: exportDiagnostic,
                 icon: const Icon(Icons.copy), label: const Text('Copier historique JSON')),
-            ],
-          )),
-          const Text('Utiliser seulement des cartes autorisées. Ne partage pas les rapports bruts.'),
+            ])),
+          const Text('Utilise uniquement les cartes autorisées. Ne partage pas les données brutes.'),
         ]),
         ListView(padding: const EdgeInsets.all(16), children: [
-          const Text('Programmer une carte', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+          const Text('Profils de cartes et applications',
+            style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
           const SizedBox(height: 8),
-          const Text('V6 : simulateur de cartes et profils locaux. Aucune écriture physique, aucun déverrouillage Windows, aucune exécution automatique à l’insertion.'),
-          panel('Nouvelle carte virtuelle', Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-            TextField(controller: profileName, maxLength: 60,
-              decoration: const InputDecoration(labelText: 'Nom de la carte', hintText: 'Carte Musique', border: OutlineInputBorder())),
-            const SizedBox(height: 8),
-            DropdownButtonFormField<String>(
-              initialValue: profileAction,
-              decoration: const InputDecoration(labelText: 'Action associée', border: OutlineInputBorder()),
-              items: const [
-                DropdownMenuItem(value: 'none', child: Text('Aucune (démonstration)')),
-                DropdownMenuItem(value: 'open', child: Text('Lancer une application Windows')),
-              ],
-              onChanged: (value) => setState(() => profileAction = value ?? 'none'),
-            ),
-            if (profileAction == 'open') ...[
-              const SizedBox(height: 12),
+          const Text('V7 : plusieurs programmes par carte virtuelle. '
+            'Les actions nécessitent un clic et une confirmation sur Windows. '
+            'Aucune écriture physique ni connexion Windows déverrouillée.'),
+          panel('Créer un profil', Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+              TextField(controller: profileName, maxLength: 60,
+                decoration: const InputDecoration(labelText: 'Nom du profil',
+                  hintText: 'Carte Gaming', border: OutlineInputBorder())),
+              const SizedBox(height: 8),
+              TextField(controller: cardLabelController, maxLength: 64,
+                decoration: const InputDecoration(labelText: 'Référence facultative de la future carte',
+                  hintText: 'Carte blanche n°1', border: OutlineInputBorder())),
+              const SizedBox(height: 8),
               TextField(controller: profileTarget,
-                decoration: const InputDecoration(labelText: 'Chemin complet du .exe',
-                  hintText: r'C:\Program Files\MonLogiciel\app.exe', border: OutlineInputBorder())),
-              const SizedBox(height: 6),
-              const Text('Le lancement sera manuel et uniquement sur ce PC Windows.'),
-            ],
-            const SizedBox(height: 12),
-            FilledButton.icon(onPressed: profileBusy ? null : addProfile,
-              icon: const Icon(Icons.add_card), label: const Text('Créer une carte virtuelle')),
-          ])),
-          panel('Simulateur', Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            SelectableText(simulatorMessage),
-            const SizedBox(height: 8),
-            const Text('Ces identifiants SIM ne constituent pas des secrets et ne doivent pas servir à authentifier une session.'),
-          ])),
-          if (profiles.isEmpty) const Text('Aucun profil pour l’instant.'),
+                decoration: const InputDecoration(labelText: 'Programme Windows (.exe)',
+                  hintText: r'C:\Program Files\Logiciel\app.exe',
+                  border: OutlineInputBorder())),
+              const SizedBox(height: 8),
+              Wrap(spacing: 8, runSpacing: 8, children: [
+                if (Platform.isWindows) OutlinedButton.icon(onPressed: pickExe,
+                  icon: const Icon(Icons.folder_open), label: const Text('Parcourir...')),
+                OutlinedButton.icon(onPressed: addDraftTarget,
+                  icon: const Icon(Icons.add), label: const Text('Ajouter ce programme')),
+              ]),
+              if (draftTargets.isNotEmpty) ...[
+                const SizedBox(height: 8),
+                for (final target in draftTargets) ListTile(
+                  dense: true, title: Text(target),
+                  trailing: IconButton(icon: const Icon(Icons.close),
+                    onPressed: () => setState(() => draftTargets.remove(target))),
+                ),
+              ],
+              const SizedBox(height: 12),
+              FilledButton.icon(onPressed: profileBusy ? null : addProfile,
+                icon: const Icon(Icons.add_card),
+                label: const Text('Enregistrer le profil virtuel')),
+            ])),
+          panel('Simulation', Column(
+            crossAxisAlignment: CrossAxisAlignment.start, children: [
+              SelectableText(simulatorMessage),
+              const SizedBox(height: 8),
+              const Text('Une référence manuelle ou un ATR ne prouve pas '
+                'l’identité d’une carte et ne doit pas servir de clé de sécurité.'),
+            ])),
+          if (profiles.isEmpty) const Text('Aucun profil enregistré pour le moment.'),
           for (final profile in profiles) panel(profile.name, Column(
             crossAxisAlignment: CrossAxisAlignment.start, children: [
-              SelectableText('ID : ${profile.id}'),
-              const SizedBox(height: 4),
-              Text(profile.action == 'open' ? 'Application : ${profile.target}' : 'Profil de démonstration'),
+              SelectableText('ID local : ${profile.id}'),
+              if (profile.cardLabel.isNotEmpty)
+                Text('Référence : ${profile.cardLabel}'),
+              const SizedBox(height: 6),
+              Text('${profile.applications.length} programme(s)'),
+              for (final app in profile.applications) Padding(
+                padding: const EdgeInsets.only(top: 5), child: SelectableText(app)),
               const SizedBox(height: 8),
               Wrap(spacing: 8, runSpacing: 8, children: [
                 OutlinedButton.icon(onPressed: () => simulate(profile),
-                  icon: const Icon(Icons.play_circle_outline), label: const Text('Simuler insertion')),
-                if (profile.action == 'open' && Platform.isWindows)
-                  FilledButton.icon(onPressed: () => launchProfile(profile),
-                    icon: const Icon(Icons.open_in_new), label: const Text('Lancer manuellement')),
+                  icon: const Icon(Icons.play_circle_outline),
+                  label: const Text('Simuler l’insertion')),
+                OutlinedButton.icon(onPressed: () => editCardLabel(profile),
+                  icon: const Icon(Icons.edit_note), label: const Text('Référence carte')),
+                if (Platform.isWindows && profile.applications.isNotEmpty)
+                  FilledButton.icon(onPressed: profileBusy ? null : () => launchProfile(profile),
+                    icon: const Icon(Icons.launch),
+                    label: const Text('Lancer les applications')),
                 TextButton.icon(onPressed: () => removeProfile(profile),
                   icon: const Icon(Icons.delete_outline), label: const Text('Supprimer')),
               ]),
-            ],
-          )),
-          OutlinedButton.icon(onPressed: exportDiagnostic, icon: const Icon(Icons.copy),
-            label: const Text('Copier profils et diagnostic JSON')),
-          const SizedBox(height: 8),
-          const Text('Prochaine étape : adapter l’écriture au modèle exact de carte vierge et ajouter une authentification cryptographique réelle.'),
+            ])),
+          OutlinedButton.icon(onPressed: exportDiagnostic,
+            icon: const Icon(Icons.copy), label: const Text('Copier profils en JSON')),
         ]),
       ]),
     ),
