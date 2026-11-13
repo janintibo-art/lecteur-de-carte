@@ -9,6 +9,8 @@ class CardProfile {
   final String created;
   final List<String> targets;
   final String cardLabel;
+  final int delaySeconds;
+  final bool sequenceEnabled;
 
   const CardProfile({
     required this.id,
@@ -18,6 +20,8 @@ class CardProfile {
     required this.created,
     this.targets = const [],
     this.cardLabel = '',
+    this.delaySeconds = 0,
+    this.sequenceEnabled = true,
   });
 
   List<String> get applications {
@@ -29,6 +33,7 @@ class CardProfile {
   Map<String, dynamic> toJson() => {
     'id': id, 'name': name, 'action': action, 'target': target,
     'created': created, 'targets': targets, 'cardLabel': cardLabel,
+    'delaySeconds': delaySeconds, 'sequenceEnabled': sequenceEnabled,
   };
 
   factory CardProfile.fromJson(Map<String, dynamic> json) {
@@ -47,13 +52,27 @@ class CardProfile {
       targets: targets.isEmpty && oldAction == 'open' && oldTarget.isNotEmpty
           ? [oldTarget] : targets,
       cardLabel: (json['cardLabel'] ?? '').toString(),
+      delaySeconds: ((json['delaySeconds'] is num) ? (json['delaySeconds'] as num).toInt() : 0).clamp(0, 30).toInt(),
+      sequenceEnabled: json['sequenceEnabled'] != false,
     );
   }
 
   CardProfile withCardLabel(String label) => CardProfile(
     id: id, name: name, action: action, target: target,
     created: created, targets: targets, cardLabel: label,
+    delaySeconds: delaySeconds, sequenceEnabled: sequenceEnabled,
   );
+  CardProfile withSequence({List<String>? apps, int? delay, bool? enabled}) {
+    final next = apps ?? applications;
+    return CardProfile(
+      id: id, name: name, action: next.isEmpty ? 'none' : 'open',
+      target: next.isEmpty ? '' : next.first,
+      created: created, targets: next, cardLabel: cardLabel,
+      delaySeconds: delay ?? delaySeconds,
+      sequenceEnabled: enabled ?? sequenceEnabled,
+    );
+  }
+
 }
 
 class CardProfileStore {

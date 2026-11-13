@@ -197,7 +197,7 @@ class _CardLabHomeState extends State<CardLabHome> {
     setState(() => simulatorMessage =
       'Carte virtuelle : ${profile.name}\nID local : ${profile.id}\n'
       'Référence déclarée : ${profile.cardLabel.isEmpty ? 'aucune' : profile.cardLabel}\n'
-      '${profile.applications.length} application(s) configurée(s).\n'
+      '${profile.applications.length} application(s) configurée(s). Délai : ${profile.delaySeconds} s.\n'
       'Simulation uniquement. Rien n’est exécuté automatiquement.');
   }
 
@@ -206,7 +206,7 @@ class _CardLabHomeState extends State<CardLabHome> {
       showMessage('Exécution réservée à Windows.');
       return;
     }
-    if (profileBusy || profile.applications.isEmpty) {
+    if (profileBusy || profile.applications.isEmpty || !profile.sequenceEnabled) {
       showMessage('Aucune application à lancer.');
       return;
     }
@@ -218,7 +218,7 @@ class _CardLabHomeState extends State<CardLabHome> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('${profile.applications.length} programme(s) vont être ouverts manuellement :'),
+            Text('${profile.applications.length} programme(s) seront lancés dans l’ordre. Délai : ${profile.delaySeconds} s. Confirmer ?'),
             const SizedBox(height: 12),
             for (final path in profile.applications) Padding(
               padding: const EdgeInsets.only(bottom: 8), child: SelectableText(path)),
@@ -234,7 +234,11 @@ class _CardLabHomeState extends State<CardLabHome> {
     setState(() => profileBusy = true);
     final messages = <String>[];
     try {
-      for (final path in profile.applications) {
+      for (var index = 0; index < profile.applications.length; index++) {
+        if (index > 0 && profile.delaySeconds > 0) {
+          await Future<void>.delayed(Duration(seconds: profile.delaySeconds));
+        }
+        final path = profile.applications[index];
         final file = File(path);
         if (!path.toLowerCase().endsWith('.exe') || !await file.exists()) {
           messages.add('Introuvable : $path');
@@ -252,6 +256,50 @@ class _CardLabHomeState extends State<CardLabHome> {
     } finally {
       if (mounted) setState(() => profileBusy = false);
     }
+  }
+
+  Future<void> moveApplication(CardProfile profile, int index, int direction) async {
+    if (profileBusy) return;
+    final apps = List<String>.from(profile.applications);
+    final destination = index + direction;
+    if (index < 0 || destination < 0 || destination >= apps.length) return;
+    final item = apps.removeAt(index);
+    apps.insert(destination, item);
+    try {
+      await persist(profiles.map((p) => p.id == profile.id
+          ? p.withSequence(apps: apps) : p).toList());
+    } catch (e) { showMessage('Ordre non enregistré : $e'); }
+  }
+
+  Future<void> setSequenceDelay(CardProfile profile) async {
+    final selected = await showDialog<int>(context: context, builder: (ctx) =>
+      SimpleDialog(title: const Text('Délai entre applications'), children: [
+        for (final seconds in const [0, 1, 3, 5, 10, 20, 30])
+          SimpleDialogOption(
+            onPressed: () => Navigator.pop(ctx, seconds),
+            child: Text('$seconds seconde(s)'),
+          ),
+      ]));
+    if (selected == null) return;
+    try {
+      await persist(profiles.map((p) => p.id == profile.id
+          ? p.withSequence(delay: selected) : p).toList());
+    } catch (e) { showMessage('Délai non enregistré : $e'); }
+  }
+
+  Future<void> toggleSequence(CardProfile profile, bool enabled) async {
+    try {
+      await persist(profiles.map((p) => p.id == profile.id
+          ? p.withSequence(enabled: enabled) : p).toList());
+    } catch (e) { showMessage('Modification impossible : $e'); }
+  }
+
+  Future<void> removeApplication(CardProfile profile, int index) async {
+    final apps = List<String>.from(profile.applications)..removeAt(index);
+    try {
+      await persist(profiles.map((p) => p.id == profile.id
+          ? p.withSequence(apps: apps) : p).toList());
+    } catch (e) { showMessage('Programme non supprimé : $e'); }
   }
 
   void analyzeAtr() => setState(() => report = AtrDecoder.decode(atrController.text));
@@ -355,7 +403,7 @@ class _CardLabHomeState extends State<CardLabHome> {
 
   void exportDiagnostic() {
     final data = <String, dynamic>{
-      'application': 'Lecteur de Carte V7', 'diagnostic': rawOutput,
+      'application': 'Lecteur de Carte V8', 'diagnostic': rawOutput,
       'lecteurs': devices, 'atr': atrController.text,
       'journal_apdu': apduHistory,
       'profils_virtuels': profiles.map((p) => p.toJson()).toList(),
@@ -379,7 +427,7 @@ class _CardLabHomeState extends State<CardLabHome> {
     length: 4,
     child: Scaffold(
       appBar: AppBar(
-        title: const Text('LECTEUR DE CARTE  ·  V7'),
+        title: const Text('LECTEUR DE CARTE  ·  V8'),
         bottom: const TabBar(isScrollable: true, tabs: [
           Tab(icon: Icon(Icons.usb), text: 'Lecteur'),
           Tab(icon: Icon(Icons.insights), text: 'ATR'),
@@ -474,10 +522,10 @@ class _CardLabHomeState extends State<CardLabHome> {
           const Text('Utilise uniquement les cartes autorisées. Ne partage pas les données brutes.'),
         ]),
         ListView(padding: const EdgeInsets.all(16), children: [
-          const Text('Profils de cartes et applications',
+          const Text('Automatisations et cartes virtuelles',
             style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
           const SizedBox(height: 8),
-          const Text('V7 : plusieurs programmes par carte virtuelle. '
+          const Text('V8 : séquences ordonnées, délai et activation par profil. '
             'Les actions nécessitent un clic et une confirmation sur Windows. '
             'Aucune écriture physique ni connexion Windows déverrouillée.'),
           panel('Créer un profil', Column(
@@ -528,9 +576,36 @@ class _CardLabHomeState extends State<CardLabHome> {
               if (profile.cardLabel.isNotEmpty)
                 Text('Référence : ${profile.cardLabel}'),
               const SizedBox(height: 6),
-              Text('${profile.applications.length} programme(s)'),
-              for (final app in profile.applications) Padding(
-                padding: const EdgeInsets.only(top: 5), child: SelectableText(app)),
+              Text('${profile.applications.length} étape(s) · intervalle ${profile.delaySeconds} s'),
+              SwitchListTile.adaptive(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('Séquence activée'),
+                subtitle: const Text('Le lancement reste manuel avec confirmation.'),
+                value: profile.sequenceEnabled,
+                onChanged: profileBusy ? null : (enabled) => toggleSequence(profile, enabled),
+              ),
+              OutlinedButton.icon(
+                onPressed: () => setSequenceDelay(profile),
+                icon: const Icon(Icons.timer_outlined),
+                label: const Text('Régler le délai'),
+              ),
+              for (var i = 0; i < profile.applications.length; i++)
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: CircleAvatar(radius: 15, child: Text('${i + 1}')),
+                  title: Text(profile.applications[i], maxLines: 2,
+                    overflow: TextOverflow.ellipsis),
+                  subtitle: const Text('Lancement Windows manuel'),
+                  trailing: Wrap(mainAxisSize: MainAxisSize.min, children: [
+                    IconButton(tooltip: 'Monter', icon: const Icon(Icons.arrow_upward),
+                      onPressed: i == 0 ? null : () => moveApplication(profile, i, -1)),
+                    IconButton(tooltip: 'Descendre', icon: const Icon(Icons.arrow_downward),
+                      onPressed: i == profile.applications.length - 1
+                        ? null : () => moveApplication(profile, i, 1)),
+                    IconButton(tooltip: 'Retirer', icon: const Icon(Icons.close),
+                      onPressed: () => removeApplication(profile, i)),
+                  ]),
+                ),
               const SizedBox(height: 8),
               Wrap(spacing: 8, runSpacing: 8, children: [
                 OutlinedButton.icon(onPressed: () => simulate(profile),
@@ -538,7 +613,7 @@ class _CardLabHomeState extends State<CardLabHome> {
                   label: const Text('Simuler l’insertion')),
                 OutlinedButton.icon(onPressed: () => editCardLabel(profile),
                   icon: const Icon(Icons.edit_note), label: const Text('Référence carte')),
-                if (Platform.isWindows && profile.applications.isNotEmpty)
+                if (Platform.isWindows && profile.applications.isNotEmpty && profile.sequenceEnabled)
                   FilledButton.icon(onPressed: profileBusy ? null : () => launchProfile(profile),
                     icon: const Icon(Icons.launch),
                     label: const Text('Lancer les applications')),
