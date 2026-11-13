@@ -26,12 +26,11 @@ jobs:
           PY
       - run: rm -rf test
       - run: flutter pub get
-      - name: Analyser Dart sans bloquer sur les informations de deprecation
-        run: flutter analyze --no-fatal-infos
+      - run: flutter analyze --no-fatal-infos
       - run: flutter build apk --debug
       - uses: actions/upload-artifact@v4
         with:
-          name: lecteur-de-carte-APK-v2
+          name: lecteur-de-carte-APK-v3
           path: build/app/outputs/flutter-apk/app-debug.apk
   windows:
     runs-on: windows-latest
@@ -46,13 +45,12 @@ jobs:
         shell: pwsh
         run: if (Test-Path test) { Remove-Item -Recurse -Force test }
       - run: flutter pub get
-      - name: Analyser Dart sans bloquer sur les informations de deprecation
-        run: flutter analyze --no-fatal-infos
+      - run: flutter analyze --no-fatal-infos
       - run: flutter build windows --release
       - name: Archiver EXE et ses DLL
         shell: pwsh
-        run: Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath lecteur-de-carte-Windows-v2.zip
+        run: Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath lecteur-de-carte-Windows-v3.zip
       - uses: actions/upload-artifact@v4
         with:
-          name: lecteur-de-carte-EXE-v2
-          path: lecteur-de-carte-Windows-v2.zip
+          name: lecteur-de-carte-EXE-v3
+          path: lecteur-de-carte-Windows-v3.zip
