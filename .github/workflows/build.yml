@@ -1,0 +1,56 @@
+name: Compiler APK et EXE
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+      - name: Generer squelette Android
+        run: flutter create --platforms=android --org com.anarchylabs .
+      - name: Installer bridge USB Android
+        run: |
+          cp android_native/MainActivity.kt android/app/src/main/kotlin/com/anarchylabs/lecteur_de_carte/MainActivity.kt
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('android/app/src/main/AndroidManifest.xml')
+          s=p.read_text().replace('<application', '<uses-feature android:name="android.hardware.usb.host" android:required="false" />\n    <application', 1)
+          p.write_text(s)
+          PY
+      - run: rm -rf test
+      - run: flutter pub get
+      - run: flutter analyze
+      - run: flutter build apk --debug
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lecteur-de-carte-APK-v1
+          path: build/app/outputs/flutter-apk/app-debug.apk
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+      - name: Generer squelette Windows
+        run: flutter create --platforms=windows --org com.anarchylabs .
+      - name: Retirer le test de demonstration Flutter
+        shell: pwsh
+        run: if (Test-Path test) { Remove-Item -Recurse -Force test }
+      - run: flutter pub get
+      - run: flutter analyze
+      - run: flutter build windows --release
+      - name: Archiver EXE et ses DLL
+        shell: pwsh
+        run: Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath lecteur-de-carte-Windows-v1.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lecteur-de-carte-EXE-v1
+          path: lecteur-de-carte-Windows-v1.zip
