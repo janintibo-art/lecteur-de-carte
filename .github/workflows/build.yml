@@ -30,7 +30,7 @@ jobs:
       - run: flutter build apk --debug
       - uses: actions/upload-artifact@v4
         with:
-          name: lecteur-de-carte-APK-v8
+          name: lecteur-de-carte-APK-v9
           path: build/app/outputs/flutter-apk/app-debug.apk
   windows:
     runs-on: windows-latest
@@ -49,8 +49,8 @@ jobs:
       - run: flutter build windows --release
       - name: Archiver EXE et ses DLL
         shell: pwsh
-        run: Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath lecteur-de-carte-Windows-v8.zip
+        run: Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath lecteur-de-carte-Windows-v9.zip
       - uses: actions/upload-artifact@v4
         with:
-          name: lecteur-de-carte-EXE-v8
-          path: lecteur-de-carte-Windows-v8.zip
+          name: lecteur-de-carte-EXE-v9
+          path: lecteur-de-carte-Windows-v9.zip
