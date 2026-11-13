@@ -1,7 +1,7 @@
 name: lecteur_de_carte
 description: Laboratoire de cartes a puce USB - Android et Windows
 publish_to: none
-version: 1.0.3+4
+version: 1.0.4+5
 environment:
   sdk: '>=3.4.0 <4.0.0'
 dependencies:
@@ -13,3 +13,4 @@ flutter:
   uses-material-design: true
   assets:
     - assets/pcsc_probe.ps1
+    - assets/pcsc_apdu.ps1

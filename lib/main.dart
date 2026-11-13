@@ -35,6 +35,10 @@ class _CardLabHomeState extends State<CardLabHome> {
   List<Map<String, dynamic>> devices = [];
   AtrReport? report;
   bool busy = false;
+  bool apduBusy = false;
+  String apduResult = 'Aucune commande envoyée.';
+  final List<Map<String, dynamic>> apduHistory = [];
+
 
   @override
   void dispose() {
@@ -113,6 +117,71 @@ class _CardLabHomeState extends State<CardLabHome> {
     }
   }
 
+  Future<void> executeSafeApdu(String action) async {
+    if (busy || apduBusy) return;
+    setState(() { apduBusy = true; apduResult = 'Communication en cours…'; });
+    try {
+      Map<String, dynamic> response;
+      if (Platform.isAndroid) {
+        final received = await channel.invokeMapMethod<String, dynamic>(
+          'sendSafeApdu', {'action': action});
+        response = Map<String, dynamic>.from(received ?? {});
+      } else if (Platform.isWindows) {
+        final script = await rootBundle.loadString('assets/pcsc_apdu.ps1');
+        final dir = await Directory.systemTemp.createTemp('lecteur_de_carte_apdu_');
+        try {
+          final file = File('${dir.path}${Platform.pathSeparator}pcsc_apdu.ps1');
+          await file.writeAsString(script);
+          final process = await Process.run('powershell.exe', [
+            '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+            '-File', file.path, '-Action', action,
+          ]);
+          if (process.exitCode != 0) {
+            throw Exception('${process.stderr} ${process.stdout}');
+          }
+          response = Map<String, dynamic>.from(jsonDecode((process.stdout as String).trim()) as Map);
+        } finally {
+          await dir.delete(recursive: true);
+        }
+      } else {
+        throw UnsupportedError('Plateforme non prise en charge');
+      }
+      final sw = response['sw']?.toString().toUpperCase();
+      if (sw != null) response['explication'] = switch (sw) {
+        '9000' => 'Commande acceptée',
+        '6A82' => 'Fichier ou application introuvable',
+        '6982' => 'Conditions de sécurité non satisfaites',
+        '6985' => 'Conditions d’utilisation non satisfaites',
+        '6D00' => 'Instruction non prise en charge',
+        '6E00' => 'Classe APDU non prise en charge',
+        _ => 'Statut renvoyé par la carte (SW1/SW2)',
+      };
+      if (!mounted) return;
+      setState(() {
+        apduHistory.insert(0, {'date': DateTime.now().toIso8601String(), ...response});
+        apduResult = const JsonEncoder.withIndent('  ').convert(response);
+      });
+    } catch (e) {
+      if (mounted) setState(() => apduResult = 'Erreur de communication : $e');
+    } finally {
+      if (mounted) setState(() => apduBusy = false);
+    }
+  }
+
+  void exportDiagnostic() {
+    final data = <String, dynamic>{
+      'application': 'Lecteur de Carte V5',
+      'diagnostic': rawOutput,
+      'lecteurs': devices,
+      'atr': atrController.text,
+      'journal_apdu': apduHistory,
+    };
+    Clipboard.setData(ClipboardData(text: const JsonEncoder.withIndent('  ').convert(data)));
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Rapport JSON copié : à enregistrer dans un fichier local.')),
+    );
+  }
+
   Widget panel(String title, Widget content) => Card(
     margin: const EdgeInsets.symmetric(vertical: 8),
     child: Padding(
@@ -130,7 +199,7 @@ class _CardLabHomeState extends State<CardLabHome> {
     length: 3,
     child: Scaffold(
       appBar: AppBar(
-        title: const Text('LECTEUR DE CARTE  ·  V4'),
+        title: const Text('LECTEUR DE CARTE  ·  V5'),
         bottom: const TabBar(tabs: [
           Tab(icon: Icon(Icons.usb), text: 'Lecteur'),
           Tab(icon: Icon(Icons.insights), text: 'ATR'),
@@ -163,6 +232,7 @@ class _CardLabHomeState extends State<CardLabHome> {
               icon: const Icon(Icons.copy), label: const Text('Copier le diagnostic'),
             ),
           ])),
+          OutlinedButton.icon(onPressed: exportDiagnostic, icon: const Icon(Icons.ios_share), label: const Text('Exporter le rapport JSON (copier)')),
           const Text('Android : autorise le port USB puis relance. Windows : PC/SC doit être disponible.'),
         ]),
         ListView(padding: const EdgeInsets.all(16), children: [
@@ -193,9 +263,9 @@ class _CardLabHomeState extends State<CardLabHome> {
           ])),
         ]),
         ListView(padding: const EdgeInsets.all(16), children: [
-          const Text('Laboratoire APDU — mode pédagogique', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+          const Text('Laboratoire APDU — analyse et lecture encadrée', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
           const SizedBox(height: 8),
-          const Text('Décompose une commande APDU ISO 7816 en local. La V4 ne transmet aucune APDU à la carte et ne modifie aucune donnée.'),
+          const Text('Le champ hexadécimal sert uniquement à l’analyse locale. Seules les deux commandes prédéfinies ci-dessous peuvent être envoyées explicitement.'),
           const SizedBox(height: 12),
           TextField(
             controller: apduController,
@@ -206,7 +276,34 @@ class _CardLabHomeState extends State<CardLabHome> {
             for (final line in ApduExplanation.explain(apduController.text))
               Padding(padding: const EdgeInsets.only(bottom: 8), child: SelectableText(line)),
           ])),
-          const Text('Les cartes bancaires, cartes d’identité et badges peuvent exiger des autorisations. Aucun contournement de protection n’est prévu.'),
+          panel('Échange réel avec une carte autorisée', Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('SELECT MF : 00 A4 00 00 02 3F 00. La carte peut refuser cette sélection.'),
+              const SizedBox(height: 8),
+              FilledButton.icon(
+                onPressed: apduBusy ? null : () => executeSafeApdu('select-mf'),
+                icon: const Icon(Icons.touch_app),
+                label: const Text('Envoyer SELECT MF'),
+              ),
+              const SizedBox(height: 12),
+              const Text('READ BINARY : 00 B0 00 00 10. Lecture de 16 octets uniquement si la carte l’autorise.'),
+              const SizedBox(height: 8),
+              OutlinedButton.icon(
+                onPressed: apduBusy ? null : () => executeSafeApdu('read-16'),
+                icon: const Icon(Icons.visibility_outlined),
+                label: const Text('Lire 16 octets'),
+              ),
+              const SizedBox(height: 12),
+              SelectableText(apduResult),
+              if (apduHistory.isNotEmpty) TextButton.icon(
+                onPressed: exportDiagnostic,
+                icon: const Icon(Icons.copy),
+                label: const Text('Copier rapport et historique JSON'),
+              ),
+            ],
+          )),
+          const Text('Utiliser uniquement avec tes cartes ou une autorisation explicite. Aucune écriture ni commande PIN. Les réponses peuvent contenir des données sensibles : ne partage pas les rapports bruts.'),
         ]),
       ]),
     ),
